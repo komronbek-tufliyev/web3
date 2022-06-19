@@ -10,3 +10,6 @@ settings.py
 __pycache__
 .ipynb_checkpoints
 Untitled.ipynb
+.idea
+pancakeAbi.txt
+.gitignore
