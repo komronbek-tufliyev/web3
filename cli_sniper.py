@@ -47,15 +47,20 @@ print(f"Balance of {wallet_address}: {web3.fromWei(web3.eth.getBalance(wallet_ad
 
 prices = []
 
+
 def buy(intoken, outtoken):
     spend = intoken
     sender_address = wallet_address
-    price = get_token_price(spend, outtoken)
+    price = get_token_price(intoken, outtoken)
+    print(f"Price: {price}")
+    global buy_price, expected_price
+    buy_price = price
+    expected_price = float(price) * (1 + float(config['takeprofit'])/100)
     print(price)
     try:
         pancakeswap_txn = contract_buy.functions.swapExactETHForTokens(
             0,
-            [spend, token_to_buy],
+            [spend, outtoken],
             wallet_address,
             (int(time.time()) + 1000*60*5),
         ).buildTransaction({
@@ -107,7 +112,6 @@ def approve():
             'gas': config['gas_limit'],
             'gasPrice': web3.toWei(config['gas_price'], 'gwei'),
             'nonce': web3.eth.getTransactionCount(wallet_address),
-            # 'value': 0,
         })
         txn.update({'gas': int(estimateGas(txn))})
 
@@ -116,17 +120,22 @@ def approve():
         tx_token = web3.eth.sendRawTransaction(signed_txn.rawTransaction)
         print(tx_token)
         print(f"Approved {token_to_buy} for ")
-        return True
+        # return True
     except InvalidTransaction as e:
         print(e)
-        return False
+        # return False
     
 
 
 def sell(intoken, outtoken):
+    
     try:
         approve()
-        time.sleep(3)
+        print("Sell function")
+        time.sleep(1)
+        sellTokenContract = web3.eth.contract(address=outtoken, abi=abis.sellAbi)
+        tokenValue = sellTokenContract.functions.balanceOf(wallet_address).call()
+        print(tokenValue)
         pancakeswap2_txn = contract_buy.functions.swapExactTokensForETH(
             tokenValue, 0,
             [outtoken, intoken],
@@ -186,33 +195,36 @@ async def log_loop(event_filter, poll_interval):
 """
 
 def main(intoken, outtoken):
-    if check_pair(intoken, outtoken):
-        print(f"Pair {intoken}/{outtoken} already exists")
-        if fetch_liquidity(intoken, outtoken):
-            print(f"Liquidity: ")
-            # if buy(intoken, outtoken):
-            #     if reach_profit(intoken, outtoken):
-            #         if approve(intoken, outtoken):
-            #             if sell(intoken, outtoken):
-            #                 print("Sell")
-            #             else:
-            #                 print("Sell failed")
-            #         else:
-            #             print("Approve failed")
-            #     else:
-            #         print("Reach profit failed")
-            # else:
-            #     print("Buy failed")
+    try:
+            
+        if check_pair(intoken, outtoken):
+            print(f"Pair {intoken}/{outtoken} already exists")
+            if fetch_liquidity(intoken, outtoken):
+                print(f"Liquidity: ")
+                if buy(intoken, outtoken):
+                    print(f"Buy function: ")
+                    if reach_profit(intoken, outtoken):
+                        if sell(intoken, outtoken):
+                            print("Sell")
+                        else:
+                            print("Sell failed")
+                    else:
+                        print("Reach profit failed")
+                else:
+                    print("Buy failed")
+            else:
+                print("Fetch liquidity failed")
+                                
         else:
-            print("Fetch liquidity failed")
-                            
-    else:
-        print("Pair not found")
-        return False
+            print("Pair not found")
+            return False
+    except Exception as e:
+        print(e)
+        exit()
 
-def get_token_price(token):
+def get_token_price(intoken, outtoken):
     amountin = web3.toWei(1, 'ether')
-    amountout = contract_buy.functions.getAmountsOut(amountin, [token, wbnb]).call()
+    amountout = contract_buy.functions.getAmountsOut(amountin, [outtoken, intoken]).call()
     # print(amountout)    # [0] is token0, [1] is token1
     # print(web3.fromWei(amountout[1], 'ether'))
     return web3.fromWei(amountout[1], 'ether')
@@ -235,18 +247,43 @@ def check_pair(intoken, outtoken):
         print(e)
         return False
 
+
+def check_pool(inToken, outToken):
+    # This function is made to calculate Liquidity of a token
+    pair_address = factoryContract.functions.getPair(inToken, outToken).call()
+    balanceContract = web3.eth.contract(address=inToken, abi=abis.sellAbi)
+    decimals = balanceContract.functions.decimals().call()
+    DECIMALS = 10 ** decimals
+    pair_contract = web3.eth.contract(address=pair_address, abi=abis.lpAbi)
+    reserves = pair_contract.functions.getReserves().call()
+
+    # print(reserves)
+    # Tokens are ordered by the token contract address
+    # The token contract address can be interpreted as a number
+    # And the smallest one will be token0 internally
+    
+    ctnb1 = int(inToken, 16)
+    ctnb2 = int(outToken, 16)
+
+    if (ctnb1 < ctnb2):
+        # print("reserves[0] is for token 0:")
+        pooled = reserves[0] / DECIMALS
+    else:
+        # print("reserves[0] is for token 1:")
+        pooled = reserves[1] / DECIMALS
+
+    return pooled
+
+
 def fetch_liquidity(intoken, outtoken):
     try:
-        pair_contract = check_pair(intoken, outtoken)
-        reserves = pair_contract.functions.getReserves().call()
-        # print(reserves)
-        pooled = reserves[1]/10**18
+        pooled = check_pool(intoken, outtoken)
         print(pooled)
-        if pooled >= 20:
+        if pooled >= config['min_liquidity']:
             print("Pooled enough")
             return True
         else:
-            print("Not enough")
+            print("Liquidity not enough")
             fetch_liquidity(intoken, outtoken)
     except Exception as e:
         print(e)
@@ -254,36 +291,38 @@ def fetch_liquidity(intoken, outtoken):
         return False
 
 
-def reach_profit():
+def reach_profit(intoken, outtoken):
     try:
-        buyed_price = get_token_price(token_to_buy)
-        current_balance = web3.fromWei(web3.eth.getBalance(wallet_address), 'ether')
-        expected_profit = buyed_price * config['takeprofit']
-        print(f"Expected profit: {expected_profit}")
-        print(f"Current balance: {current_balance}")
-        if current_balance >= expected_profit:
+        current_price = float(get_token_price(intoken, outtoken))
+        print(f"Current price: {current_price}")
+        print(f"Expected price: {buy_price}")
+        print(f"Profit percentage: {round((current_price/float(buy_price) - 1)*100, 5)}")
+        if current_price >= expected_price:
             print("Reach profit")
+            return True
         else:
             print("Not reach profit")
+            time.sleep(3)
+            reach_profit(intoken, outtoken)
     except Exception as e:
         print(e)
         print("Reach profit failed")
         return False
 
-def get_token_informations(token):
-    try:
-        token_info = contract_buy.functions.getTokenInfo(token).call()
-        print(token_info)
-        return token_info
-    except Exception as e:
-        print(e)
-        return False
-
-
+ 
 if __name__=="__main__":
-    # main(wbnb, web3.toChecksumAddress('0x8f36cc333f55b09bb71091409a3d7ade399e3b1c'))
-    print(f"Profit: {calc_profit(float(config['amount']), config['takeprofit'])}")
-    print(f"Loss: {calc_loss(float(config['amount']), config['stoploss'])}")
+    buy_price = get_token_price(wbnb, web3.toChecksumAddress('0xf20702BD4D8D1DDbe3c9a64fdb9E8132a4B1839D'))
+    print(buy_price)
+    expected_price = float(buy_price) * (1 + float(config['takeprofit'])/100)
+    print(expected_price)
+    # reach_profit(wbnb, web3.toChecksumAddress('0xf20702BD4D8D1DDbe3c9a64fdb9E8132a4B1839D'))
+    # fetch_liquidity(wbnb, web3.toChecksumAddress('0xF952Fc3ca7325Cc27D15885d37117676d25BfdA6'))
+    # main(wbnb, web3.toChecksumAddress('0xf20702BD4D8D1DDbe3c9a64fdb9E8132a4B1839D'))
+    # print(f"Profit: {calc_profit(float(config['amount']), config['takeprofit'])}")
+    # print(f"Loss: {calc_loss(float(config['amount']), config['stoploss'])}")
+    # get_token_price(web3.toChecksumAddress('0xf952fc3ca7325cc27d15885d37117676d25bfda6'))
+    # print(check_pool(wbnb, web3.toChecksumAddress('0xF952Fc3ca7325Cc27D15885d37117676d25BfdA6')))
+    sell(wbnb, web3.toChecksumAddress('0xe9e7cea3dedca5984780bafc599bd69add087d56'))
     end = datetime.now()
     print(f"Time: {end - start}")
     # print("DUNYO SENI TOG'ANGMAS YO AMAKIVACHCHANGMAS!!!")
